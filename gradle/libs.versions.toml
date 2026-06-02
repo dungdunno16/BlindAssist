@@ -14,6 +14,7 @@ tflite               = "2.16.1"
 tfliteSupport        = "0.4.4"
 opencv               = "4.10.0"
 coroutines           = "1.9.0"
+generativeai         = "0.9.0"
 
 [libraries]
 androidx-core-ktx              = { group = "androidx.core",              name = "core-ktx",              version.ref = "coreKtx"          }
@@ -33,6 +34,7 @@ tensorflow-lite-gpu            = { group = "org.tensorflow",             name = 
 tensorflow-lite-gpu-api        = { group = "org.tensorflow",             name = "tensorflow-lite-gpu-api", version.ref = "tflite"          }
 opencv-android                 = { group = "org.opencv",                 name = "opencv",                 version.ref = "opencv"           }
 kotlinx-coroutines-android     = { group = "org.jetbrains.kotlinx",      name = "kotlinx-coroutines-android", version.ref = "coroutines"  }
+google-generativeai            = { group = "com.google.ai.client.generativeai", name = "generativeai", version.ref = "generativeai" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp"    }

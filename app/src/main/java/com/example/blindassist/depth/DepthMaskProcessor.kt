@@ -1,5 +1,6 @@
 package com.example.blindassist.depth
 
+import android.util.Log
 import com.example.blindassist.Config
 import org.opencv.core.Core
 import org.opencv.core.CvType
@@ -9,58 +10,43 @@ import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 
 object DepthMaskProcessor {
-
     fun process(depthMat: Mat, frameWidth: Int, frameHeight: Int): Mat {
-        // Step 1: Normalize to [0, 255] CV_8U
+
+        // Bước 1 — Normalize
         val normMat = Mat()
         Core.normalize(depthMat, normMat, 0.0, 255.0, Core.NORM_MINMAX, CvType.CV_8U)
 
-        // Step 2: Crop ROI - lower 2/3 of the frame
-        val roiY = frameHeight / 3
-        val roiH = frameHeight - roiY
-        val roi = Rect(0, roiY, frameWidth, roiH)
-        val normMatRoi = Mat(normMat, roi)
+        // Bước 2 — Crop ROI: phần dưới 4/5 frame
+        val roiY = normMat.rows() / 5
+        val roiH = normMat.rows() - roiY
+        val roiRect = Rect(0, roiY, normMat.cols(), roiH)
+        val roiMat = normMat.submat(roiRect)
 
-        // Step 3: Dynamic threshold based on percentile
-        val flat = normMatRoi.reshape(1, 1)
-        val sortedFlat = Mat()
-        Core.sort(flat, sortedFlat, Core.SORT_EVERY_ROW or Core.SORT_ASCENDING)
-
-        val foregroundRatio = Config.FOREGROUND_RATIO
-        var cutoffIdx = (sortedFlat.cols() * (1f - foregroundRatio)).toInt()
-        if (cutoffIdx < 0) cutoffIdx = 0
-        if (cutoffIdx >= sortedFlat.cols()) cutoffIdx = sortedFlat.cols() - 1
-
-        val thresholdArr = ByteArray(1)
-        sortedFlat.get(0, cutoffIdx, thresholdArr)
-        val thresholdVal = (thresholdArr[0].toInt() and 0xFF).toDouble()
-
-        val maskRoi = Mat()
-        Imgproc.threshold(normMatRoi, maskRoi, thresholdVal, 255.0, Imgproc.THRESH_BINARY)
-
-        // Step 4: Morphology
-        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, Size(5.0, 5.0))
-        val openMask = Mat()
-        Imgproc.morphologyEx(maskRoi, openMask, Imgproc.MORPH_OPEN, kernel)
-        
-        val closeMask = Mat()
-        Imgproc.morphologyEx(openMask, closeMask, Imgproc.MORPH_CLOSE, kernel)
-
-        // Step 5: Return mask with full frame size
-        val fullMask = Mat.zeros(frameHeight, frameWidth, CvType.CV_8U)
-        val fullMaskRoi = Mat(fullMask, roi)
-        closeMask.copyTo(fullMaskRoi)
-
-        // Step 6: Release temporary Mats
+        // Bước 3 — Gaussian blur trên ROI
+        val blurred = Mat()
+        Imgproc.GaussianBlur(roiMat, blurred, Size(5.0, 5.0), 0.0)
+        roiMat.release()
         normMat.release()
-        normMatRoi.release()
-        flat.release()
-        sortedFlat.release()
-        maskRoi.release()
+
+        // Bước 4 — Canny trên ROI
+        val edges = Mat()
+        Imgproc.Canny(blurred, edges, 30.0, 100.0)
+        blurred.release()
+
+        // Bước 5 — Dilate mạnh để nối cạnh
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
+        val roiMask = Mat()
+        Imgproc.dilate(edges, roiMask, kernel, org.opencv.core.Point(-1.0, -1.0), 4)
+        edges.release()
         kernel.release()
-        openMask.release()
-        closeMask.release()
-        fullMaskRoi.release()
+
+        // Bước 6 — Đưa ROI mask vào mask gốc (tương ứng với vị trí đã crop)
+        val fullMask = Mat.zeros(depthMat.rows(), depthMat.cols(), CvType.CV_8U)
+        val maskRoiDest = fullMask.submat(roiRect)
+        roiMask.copyTo(maskRoiDest)
+        
+        roiMask.release()
+        maskRoiDest.release()
 
         return fullMask
     }

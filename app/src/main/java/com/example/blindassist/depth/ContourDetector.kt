@@ -22,13 +22,20 @@ object ContourDetector {
 
         val result = mutableListOf<Rect>()
         val minArea = Config.MIN_CONTOUR_AREA.toDouble()
-        val frameArea = (frameWidth * frameHeight).toDouble()
-        val maxArea = frameArea * Config.MAX_CONTOUR_RATIO
+        // Fix: Use mask dimensions instead of camera frame dimensions
+        val maxArea = (mask.cols() * mask.rows()) * Config.MAX_CONTOUR_RATIO.toDouble()
+        
+        val minWidth = mask.cols() * 0.15 // at least 5% width
+        val minHeight = mask.rows() * 0.15 // at least 5% height
 
         for (contour in contours) {
             val area = Imgproc.contourArea(contour)
             if (area in minArea..maxArea) {
-                result.add(Imgproc.boundingRect(contour))
+                val bbox = Imgproc.boundingRect(contour)
+                // Filter out small bounding boxes (noise/artifacts)
+                if (bbox.width >= minWidth && bbox.height >= minHeight) {
+                    result.add(bbox)
+                }
             }
             contour.release() // Release MatOfPoint memory
         }

@@ -1,19 +1,134 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/main"
     android:layout_width="match_parent"
-    android:layout_height="match_parent"
-    tools:context=".MainActivity">
+    android:layout_height="match_parent">
 
+    <!-- Layer 1: Camera preview (bottom) -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:scaleType="fitCenter" />
+
+    <!-- Layer 2: Bbox overlay -->
     <com.example.blindassist.ui.CameraOverlayView
         android:id="@+id/overlayView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        android:layout_height="match_parent" />
 
-</androidx.constraintlayout.widget.ConstraintLayout>
+    <!-- Layer 3: Depth map preview (bottom-left) -->
+    <ImageView
+        android:id="@+id/depthImageView"
+        android:layout_width="120dp"
+        android:layout_height="120dp"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="32dp"
+        android:scaleType="fitCenter"
+        android:background="#44000000"
+        android:elevation="4dp"
+        android:visibility="gone" />
+
+    <!-- Layer 4: DevMode Panel (Top-Start) -->
+    <TextView
+        android:id="@+id/devModePanel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="16dp"
+        android:background="#88000000"
+        android:padding="8dp"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp"
+        android:typeface="monospace"
+        android:visibility="gone" />
+
+    <!-- Layer 5: Settings Button (Top-End) -->
+    <Button
+        android:id="@+id/btnSettings"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="32dp"
+        android:text="⚙ Cài đặt"
+        android:textColor="#FFFFFF"
+        android:backgroundTint="#AA000000" />
+
+    <!-- Layer 6: Height Input Form Overlay -->
+    <LinearLayout
+        android:id="@+id/heightInputLayout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#DD000000"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:visibility="gone"
+        android:padding="32dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Xin chào!"
+            android:textColor="#FFFFFF"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Để tính toán khoảng cách chính xác, vui lòng nhập chiều cao của bạn (cm):"
+            android:textColor="#CCCCCC"
+            android:textSize="16sp"
+            android:textAlignment="center"
+            android:layout_marginBottom="32dp" />
+
+        <EditText
+            android:id="@+id/etUserHeight"
+            android:layout_width="150dp"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:hint="Ví dụ: 165"
+            android:textColorHint="#888888"
+            android:textColor="#FFFFFF"
+            android:textSize="20sp"
+            android:textAlignment="center"
+            android:backgroundTint="#FFFFFF"
+            android:layout_marginBottom="16dp" />
+
+        <TextView
+            android:id="@+id/tvHeightError"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FF5555"
+            android:textSize="14sp"
+            android:visibility="gone"
+            android:layout_marginBottom="16dp" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btnCancelHeight"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Hủy"
+                android:backgroundTint="#888888"
+                android:textColor="#FFFFFF"
+                android:layout_marginEnd="16dp"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/btnStart"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Bắt đầu"
+                android:backgroundTint="#0088FF"
+                android:textColor="#FFFFFF" />
+        </LinearLayout>
+    </LinearLayout>
+
+</FrameLayout>

@@ -6,15 +6,19 @@ object Config {
     const val MIDAS_INPUT_SIZE        = 256
 
     // ── Detection ──
-    const val FOREGROUND_RATIO        = 0.35f
     const val MIN_CONTOUR_AREA        = 800
     const val MAX_CONTOUR_RATIO       = 0.7f
     const val MERGE_IOU_THRESHOLD     = 0.1f
-    const val MERGE_GAP_PX            = 25
+    const val MERGE_GAP_PX            = 15
 
     // ── Tracking ──
-    const val MAX_MISSED_FRAMES       = 8
-    const val IOU_MATCH_THRESHOLD     = 0.25f
+    const val TRACK_INTERVAL          = 5
+    const val MAX_MISSED_FRAMES       = 15
+    const val IOU_MATCH_THRESHOLD     = 0.3f
+    const val MAX_CORNERS             = 20
+    const val QUALITY_LEVEL           = 0.01
+    const val MIN_DISTANCE            = 5.0
+    const val OF_WIN_SIZE             = 15
 
     // ── Kalman noise ──
     const val PROCESS_NOISE           = 1e-2
@@ -46,4 +50,11 @@ object Config {
     const val MIN_USER_HEIGHT_CM      = 100
     const val MAX_USER_HEIGHT_CM      = 220
     const val PREF_KEY_HEIGHT         = "user_height_cm"
+
+    // ── Gemini Describe ──
+    const val DESCRIBE_COOLDOWN_MS       = 5000L
+    const val DESCRIBE_TIMEOUT_MS        = 10000L
+    const val DESCRIBE_SUPPRESS_ALERT_MS = 10000L
+    const val DESCRIBE_IMAGE_MAX_SIDE    = 640
+    const val GEMINI_MODEL_NAME          = "gemini-2.5-flash"
 }

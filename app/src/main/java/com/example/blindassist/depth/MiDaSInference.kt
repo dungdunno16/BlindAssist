@@ -43,28 +43,36 @@ class MiDaSInference(context: Context) {
         return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
     }
 
+    private var isFirstInference = true
+
     init {
         val mappedByteBuffer = loadMappedFile(context, "MiDaS_small.tflite")
         val compatList = CompatibilityList()
         val options = Interpreter.Options()
 
+        Log.i(TAG, "══════════════════════════════════════")
+        Log.i(TAG, "GPU supported: ${compatList.isDelegateSupportedOnThisDevice}")
+
         if (compatList.isDelegateSupportedOnThisDevice) {
             try {
                 gpuDelegate = GpuDelegate(compatList.bestOptionsForThisDevice)
                 options.addDelegate(gpuDelegate)
-                Log.i(TAG, "GpuDelegate is being used.")
+                Log.i(TAG, "✅ GpuDelegate ACTIVE")
             } catch (e: Exception) {
-                Log.e(TAG, "GpuDelegate initialization failed, falling back to CPU", e)
+                Log.e(TAG, "❌ GpuDelegate FAILED, falling back to CPU", e)
                 gpuDelegate?.close()
                 gpuDelegate = null
                 options.numThreads = 4
+                Log.i(TAG, "⚠️ Using CPU with 4 threads")
             }
         } else {
-            Log.i(TAG, "GpuDelegate is not supported, using CPU.")
+            Log.i(TAG, "⚠️ GPU not supported, using CPU with 4 threads")
             options.numThreads = 4
         }
 
         interpreter = Interpreter(mappedByteBuffer, options)
+        Log.i(TAG, "Backend: ${if (gpuDelegate != null) "GPU" else "CPU"}")
+        Log.i(TAG, "══════════════════════════════════════")
     }
 
     fun infer(frameBitmap: Bitmap): Mat {
@@ -98,7 +106,15 @@ class MiDaSInference(context: Context) {
 
         // 3. interpreter.run(inputArray, outputArray)
         inputBuffer.rewind()
+        val t0 = System.nanoTime()
         interpreter.run(inputBuffer, outputArray)
+        val inferMs = (System.nanoTime() - t0) / 1_000_000.0
+        if (isFirstInference) {
+            Log.i(TAG, "══ First inference: %.1f ms (includes warmup) ══".format(inferMs))
+            isFirstInference = false
+        } else {
+            Log.d(TAG, "Inference: %.1f ms".format(inferMs))
+        }
 
         // 4. Wrap output to Mat 256x256 CV_32F
         val wrapMat = Mat(inputSize, inputSize, CvType.CV_32F)

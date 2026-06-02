@@ -45,6 +45,10 @@ app/
 │   │   │   └── DistanceEstimator.kt
 │   │   ├── alert/
 │   │   │   └── AlertManager.kt
+│   │   ├── gemini/
+│   │   │   ├── GeminiDescriber.kt
+│   │   │   ├── SceneDescribeController.kt
+│   │   │   └── SceneMetadata.kt
 │   │   ├── ui/
 │   │   │   ├── CameraOverlayView.kt
 │   │   │   ├── DevModePanel.kt
@@ -178,6 +182,9 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+
+    // Gemini
+    implementation(libs.google.generativeai)
 }
 ```
 
@@ -240,6 +247,13 @@ object Config {
     const val MIN_USER_HEIGHT_CM      = 100
     const val MAX_USER_HEIGHT_CM      = 220
     const val PREF_KEY_HEIGHT         = "user_height_cm"
+
+    // ── Gemini Scene Description ──
+    const val GEMINI_MODEL_NAME       = "gemini-1.5-flash"
+    const val DESCRIBE_IMAGE_MAX_SIDE = 512
+    const val DESCRIBE_COOLDOWN_MS    = 10000L
+    const val DESCRIBE_SUPPRESS_ALERT_MS = 5000L
+    const val DESCRIBE_TIMEOUT_MS     = 10000L
 }
 ```
 
@@ -361,33 +375,29 @@ object DepthMaskProcessor {
     // Bước 1 — Normalize về [0, 255] CV_8U
     //   Core.normalize(depthMat, normMat, 0.0, 255.0, Core.NORM_MINMAX, CvType.CV_8U)
 
-    // Bước 2 — Crop ROI: phần dưới 2/3 frame
-    //   roiY = frameHeight / 3
+    // Bước 2 — Crop ROI: phần dưới 4/5 frame (bỏ 1/5 phía trên cùng)
+    //   roiY = frameHeight / 5
     //   roiH = frameHeight - roiY
     //   roi  = Rect(0, roiY, frameWidth, roiH)
-    //   ⚠️ OpenCV Rect(x, y, width, height) — height là KÍCH THƯỚC, không phải tọa độ cuối
-    //   Lý do: phần trên frame thường là trời/tường xa, không phải vật cản
+    //   Lý do: phần trên frame thường là trời/tường xa, dễ sinh nhiễu
 
-    // Bước 3 — Dynamic threshold theo percentile (KHÔNG dùng ngưỡng cứng)
-    //   Lý do: MiDaS relative depth thay đổi scale theo từng frame/scene
-    //   foregroundRatio = Config.FOREGROUND_RATIO  (35%)
-    //   flat = normMat_roi.reshape(1,1)
-    //   sort ascending
-    //   cutoffIdx = (flat.cols() * (1f - foregroundRatio)).toInt()
-    //   threshold  = flat.get(0, cutoffIdx)[0]
-    //   Imgproc.threshold(normMat_roi, mask, threshold, 255.0, THRESH_BINARY)
+    // Bước 3 — Gaussian Blur trên ROI
+    //   Làm mượt ảnh để giảm nhiễu hạt trước khi tìm cạnh
+    //   Imgproc.GaussianBlur(roiMat, blurred, Size(5.0, 5.0), 0.0)
 
-    // Bước 4 — Morphology
-    //   kernel = getStructuringElement(MORPH_ELLIPSE, Size(5.0, 5.0))
-    //   MORPH_OPEN  → xóa noise pixel nhỏ
-    //   MORPH_CLOSE → lấp lỗ hổng bên trong object
+    // Bước 4 — Canny Edge Detection trên ROI
+    //   Sử dụng Canny để tìm các đường viền sắc nét của vật cản thay vì dùng threshold cứng
+    //   Imgproc.Canny(blurred, edges, 30.0, 100.0)
 
-    // Bước 5 — Trả về mask full frame size
-    //   Tạo Mat zeros cùng size frame, copy mask vào vùng ROI
+    // Bước 5 — Dilate mạnh để nối cạnh
+    //   Làm dày các đường viền vừa tìm được để tạo thành các mảng liền mạch
+    //   Imgproc.dilate(edges, roiMask, kernel, Point(-1.0, -1.0), 4)
 
-    // Bước 6 — Release Mat tạm
-    //   normMat, flat (sorted copy), kernel, intermediate morph Mats → .release()
-    //   CHỈ trả về fullMask — caller chịu trách nhiệm release nó
+    // Bước 6 — Trả về mask full frame size
+    //   Tạo Mat zeros cùng size frame, copy mask từ ROI vào đúng vị trí
+
+    // Bước 7 — Release Mat tạm
+    //   normMat, blurred, edges, kernel → .release()
 
     fun process(depthMat: Mat, frameWidth: Int, frameHeight: Int): Mat
 }
@@ -406,6 +416,8 @@ object ContourDetector {
     // Filter:
     //   minArea = Config.MIN_CONTOUR_AREA (800 px²)
     //   maxArea = frameArea * Config.MAX_CONTOUR_RATIO (0.7)
+    //   Lọc thêm width/height: minWidth = mask.cols() * 0.15, minHeight = mask.rows() * 0.15
+    //   (Bỏ qua các nhiễu nhỏ hẹp ngang hoặc dọc)
     // Trả về List<Rect>: boundingRect() của mỗi contour hợp lệ
 
     fun detect(mask: Mat, frameWidth: Int, frameHeight: Int): List<Rect>
@@ -462,63 +474,57 @@ object BBoxMerger {
 
 ---
 
-### 5.7 `MultiObjectTracker.kt`
+### 5.7 `MultiObjectTracker.kt` (và các file tracking liên quan)
 
-**Mục đích:** SORT-lite tracker — liên kết bbox giữa các frame, smooth bằng Kalman Filter.
+**Mục đích:** Tracker kết hợp **Optical Flow** (Lucas-Kanade) và **Kalman Filter**. Giữa các lần có inference, tracker dùng Optical Flow trên ảnh xám (grayMat) để cập nhật vị trí bbox.
 
-**Kalman Filter:**
-```
-State:       [x, y, w, h, vx, vy]  — 6 states
-Measurement: [x, y, w, h]           — 4 measurements
-
-Transition (dt = 1 frame):
-  x' = x + vx,  y' = y + vy,  w' = w,  h' = h,  vx' = vx,  vy' = vy
-
-Noise:
-  processNoiseCov     = Config.PROCESS_NOISE    (1e-2)
-  measurementNoiseCov = Config.MEASUREMENT_NOISE (1e-1)
-  errorCovPost        = 1.0
-```
-
-**Track:**
+**TrackConfig:**
 ```kotlin
-data class Track(
+object TrackConfig {
+    const val TRACK_INTERVAL    = 5
+    const val IOU_MATCH_THRESH  = 0.3f
+    const val MAX_MISSED_FRAMES = 15
+    const val MAX_CORNERS       = 20
+    const val QUALITY_LEVEL     = 0.01
+    const val MIN_DISTANCE      = 5.0
+    const val OF_WIN_SIZE       = 15
+}
+```
+
+**TrackerEntry:**
+```kotlin
+data class TrackerEntry(
     val id: Int,
-    val kf: KalmanFilter,
+    var box: Rect,
+    var smoothedBox: Rect,
+    val kf: BoxKalmanFilter,
+    var points: MatOfPoint2f, // Các feature points để track Optical Flow
     var missedFrames: Int = 0,
-    var smoothedBox: Rect = Rect()
+    var distanceM: Double? = null
 ) {
-    fun predict(): Rect   // kf.predict() → update smoothedBox từ state[0..3]
-    fun update(det: Rect) // kf.correct(measurement) → missedFrames = 0
+    fun release() { points.release() }
 }
 ```
 
 **MultiObjectTracker:**
 ```kotlin
 class MultiObjectTracker {
-    // MAX_MISSED  = Config.MAX_MISSED_FRAMES  (8)
-    // IOU_THRESH  = Config.IOU_MATCH_THRESHOLD (0.25f)
+    // updateWithDetections(detections, grayFrame): List<TrackerEntry>
+    //   1. So khớp IoU để kế thừa tracker cũ (IoU >= 0.3f)
+    //   2. Extract feature points mới bằng goodFeaturesToTrack trong vùng bbox
+    //   3. Cập nhật state BoxKalmanFilter
 
-    // update(detections): List<Track>
-    //   1. predict() tất cả track
-    //   2. Greedy IoU matching (đủ cho 2–5 object)
-    //   3. Matched track → update(det), missedFrames = 0
-    //   4. Unmatched track → missedFrames++
-    //   5. Unmatched detection → tạo Track mới
-    //   6. Xóa track có missedFrames > MAX_MISSED
-    //   7. Trả về list track còn sống
+    // updateWithOpticalFlow(grayFrame): List<TrackerEntry>
+    //   1. Dùng Video.calcOpticalFlowPyrLK với prevGray và grayFrame hiện tại
+    //   2. Tính median(dx), median(dy) của các điểm dịch chuyển
+    //   3. Di chuyển bbox theo dx, dy và update BoxKalmanFilter
 
-    // predictOnly(): List<Track>
-    //   Chỉ gọi predict() tất cả track, KHÔNG correct bằng detection cũ
-    //   Dùng cho các frame không có inference mới
-    //   LÝ DO: nếu correct lặp lại bằng detection cũ, Kalman bị "đứng yên" giả tạo
+    // clearAll(): xóa toàn bộ track và release prevGray — gọi khi scene change
 
-    // clearAll(): xóa toàn bộ track — gọi khi scene change
-
-    fun update(detections: List<Rect>): List<Track>
-    fun predictOnly(): List<Track>
+    fun updateWithDetections(detections: List<Rect>, grayFrame: Mat): List<TrackerEntry>
+    fun updateWithOpticalFlow(grayFrame: Mat): List<TrackerEntry>
     fun clearAll()
-    fun activeTracks(): List<Track>
+    fun activeTracks(): List<TrackerEntry>
 }
 ```
 
@@ -624,7 +630,7 @@ class AlertManager(context: Context) {
     //   isReady = true chỉ sau khi onInit SUCCESS
     //   update() chỉ gọi TTS khi isReady == true
 
-    fun update(tracks: List<Track>, distances: Map<Int, Double>, frameWidth: Int)
+    fun update(tracks: List<TrackerEntry>, frameWidth: Int)
     fun stop()      // tts.stop()     — gọi ở onPause()
     fun shutdown()  // tts.shutdown() — gọi ở onDestroy()
 }
@@ -649,48 +655,28 @@ class CameraOverlayView(context: Context, attrs: AttributeSet? = null) : View(co
     // Scale: scaleX = view.width / frameWidth
     //        scaleY = view.height / frameHeight
 
-    fun setData(tracks: List<Track>, distances: Map<Int, Double>, frameWidth: Int, frameHeight: Int)
+    fun updateTracks(tracks: List<TrackerEntry>, frameWidth: Int, frameHeight: Int)
 }
 ```
 
 ---
 
-### 5.11 `DevModePanel.kt`
+### 5.11 `DevModePanel` & Debug UI
 
-**Mục đích:** Overlay debug khi DevMode bật.
+**Mục đích:** Overlay debug khi DevMode bật. Bao gồm 1 `TextView` (hiển thị stats) và 1 `ImageView` (hiển thị depth map)
 
-**Layout:**
+**Layout Text:**
 ```
-┌─────────────────────────────┐
-│ DEV MODE                    │
-├─────────────────────────────┤
-│ FPS:        24              │
-│ Objects:    3               │
-│ Tilt:       14.2°           │
-│ Inference:  87ms            │
-├─────────────────────────────┤
-│ Track #1   Z=1.2m   NEAR    │
-│ Track #2   Z=2.8m   MID     │
-│ Track #3   Z=null   N/A     │
-└─────────────────────────────┘
+FPS:        24.0
+Objects:    3
+Tilt:       14.2°
+
+ID: 0 -> 1.20m
+ID: 1 -> 2.80m
 ```
 
 **Spec:**
-```kotlin
-data class DevStats(
-    val fps: Float,
-    val objectCount: Int,
-    val tiltDeg: Float?,
-    val inferenceMs: Float,
-    val trackDistances: Map<Int, Double?>
-)
-
-class DevModePanel(context: Context, attrs: AttributeSet? = null) : View(context, attrs) {
-    // Vị trí: góc trái trên, padding 16dp
-    // Background: đen 70% alpha, bo góc 8dp
-    // Font: monospace 12sp, màu trắng
-    fun setStats(stats: DevStats)
-}
+Thay vì custom view phức tạp, `MainActivity` dùng trực tiếp `TextView` cho devModePanel và `ImageView` cho depth map. Cập nhật string hiển thị mỗi frame trên Main thread thông qua `PipelineManager`.
 ```
 
 ---
@@ -771,14 +757,17 @@ class PipelineManager(
     private val distanceEstimator: DistanceEstimator,
     private val alertManager: AlertManager,
     private val overlayView: CameraOverlayView,
-    private val devModePanel: DevModePanel,
-    private val devModeProvider: () -> Boolean,
-    private val userHeightM: Double
+    private val devModePanel: TextView,
+    private val depthImageView: ImageView,
+    private val devModeProvider: () -> Boolean
 ) {
     @Volatile var currentFps: Float = 0f
         private set
 
-    fun onFrame(bitmap: Bitmap, frameWidth: Int, frameHeight: Int, scope: CoroutineScope)
+    // grayMat dùng cho Optical Flow tracker
+    fun onFrame(bitmap: Bitmap, grayMat: Mat, frameWidth: Int, frameHeight: Int, scope: CoroutineScope)
+    fun getLatestFrameSnapshot(): Bitmap?
+    fun getSceneMetadataSnapshot(): com.example.blindassist.gemini.SceneMetadata
 }
 ```
 
@@ -814,8 +803,9 @@ class MainActivity : AppCompatActivity() {
     //    Camera2Interop sau khi bind xong
     //    distanceEstimator.updateIntrinsics(fy, cy)
 
-    // 6. DevMode FAB: FloatingActionButton icon bug_report, góc phải dưới
-    //    Toggle devMode → update visibility overlay + panel
+    // 6. Nút Cài đặt (btnSettings):
+    //    Mở PopupMenu có 2 tùy chọn: "Chỉnh sửa chiều cao" và "Bật/Tắt DevMode".
+    //    Double tap trên màn hình: Kích hoạt SceneDescribeController.
 
     // Lifecycle:
     //   onResume:  tiltEstimator.start()
@@ -888,19 +878,42 @@ class MainActivity : AppCompatActivity() {
             android:text="Bắt đầu" />
     </LinearLayout>
 
-    <!-- Layer 5: DevMode FAB (bottom-right) -->
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/fabDevMode"
+    <!-- Nút Settings (bottom-right) thay thế FAB -->
+    <Button
+        android:id="@+id/btnSettings"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|end"
         android:layout_margin="16dp"
-        android:src="@android:drawable/ic_menu_report_image"
-        android:contentDescription="Toggle DevMode"
+        android:text="Cài đặt" />
+
+    <!-- Thêm depthImageView cho DevMode -->
+    <ImageView
+        android:id="@+id/depthImageView"
+        android:layout_width="160dp"
+        android:layout_height="120dp"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="16dp"
         android:visibility="gone" />
-    <!-- FAB visibility=gone ban đầu, chỉ VISIBLE sau khi nhập height và camera bắt đầu -->
 
 </FrameLayout>
+
+---
+
+### 5.15 `GeminiDescriber.kt` & `SceneMetadata.kt`
+
+**Mục đích:** Đóng gói frame + metadata thành prompt gửi cho Gemini API để nhận lại mô tả tiếng Việt (2-3 câu).
+- `SceneMetadata`: bao gồm `obstacleCount`, danh sách `ObstacleInfo` (tọa độ/vùng, khoảng cách), và `tiltAngleDeg`.
+- Downscale ảnh: để giảm latency, ảnh trước khi gửi cho Gemini sẽ được resize (max dimension `Config.DESCRIBE_IMAGE_MAX_SIDE`).
+
+---
+
+### 5.16 `SceneDescribeController.kt`
+
+**Mục đích:** Xử lý sự kiện Double Tap từ UI, quản lý timeout, cooldown, và điều phối PipelineManager + AlertManager.
+- Lấy snapshot frame và metadata mới nhất từ `PipelineManager`.
+- Suppress các cảnh báo khoảng cách (AlertManager) để không dội âm thanh vào lúc Gemini đang "đọc" kết quả.
+- Dùng `withTimeoutOrNull` để tránh block lâu nếu rớt mạng.
 ```
 
 > **Layer order:** FrameLayout stack từ dưới lên: PreviewView → OverlayView → DevPanel → HeightInput → FAB.
@@ -912,7 +925,7 @@ class MainActivity : AppCompatActivity() {
 ## 6. Luồng dữ liệu end-to-end
 
 ```
-CameraX frame (ImageProxy → Bitmap, 640×480)
+CameraX frame (ImageProxy → Bitmap, 640×480, YUV → Gray Mat)
         │
         ├──[BG Thread: Dispatchers.Default]─────────────────────────────┐
         │   MiDaSInference.infer(bitmap)                                │
@@ -923,18 +936,30 @@ CameraX frame (ImageProxy → Bitmap, 640×480)
         │        ↓ raw List<Rect>                                       │
         │   BBoxMerger.merge()                                          │
         │        ↓ merged List<Rect>                                    │
-        │   @Volatile latestDetections, hasNewDetections, lastInferenceMs│
+        │   @Volatile latestDetections, hasNewDetections                │
+        │   @Volatile latestDepthBitmap (cho UI)                        │
         └────────────────────────────────────────────────────────────────┘
         │
         ├──[Main Thread: Dispatchers.Main — mỗi frame]──────────────────┐
-        │   if hasNewDetections → tracker.update(latestDetections)      │
-        │   else                → tracker.predictOnly()                 │
+        │   if hasNewDetections → tracker.updateWithDetections(...)     │
+        │   else                → tracker.updateWithOpticalFlow(...)    │
         │   TiltEstimator.getTiltRad()  → Double?                      │
         │   DistanceEstimator.estimate() per track                      │
-        │        ↓ Map<trackId, Z>                                      │
+        │        ↓ Track.distanceM                                      │
         │   AlertManager.update()  → TTS                               │
-        │   [devMode] CameraOverlayView.setData()                       │
-        │   [devMode] DevModePanel.setStats()                           │
+        │   [devMode] CameraOverlayView.updateTracks()                  │
+        │   [devMode] DevModePanel.text update                          │
+        └────────────────────────────────────────────────────────────────┘
+        │
+        ├──[Sự kiện User: Double Tap]───────────────────────────────────┐
+        │   SceneDescribeController.onDoubleTap()                       │
+        │   AlertManager.suppressAlerts(5000ms)                         │
+        │   PipelineManager.getLatestFrameSnapshot()                    │
+        │   PipelineManager.getSceneMetadataSnapshot()                  │
+        │        ↓ (IO Thread)                                          │
+        │   GeminiDescriber.describe(bitmap, metadata)                  │
+        │        ↓ (Main Thread)                                        │
+        │   AlertManager.speakImmediate("mô tả cảnh...")                │
         └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1045,17 +1070,17 @@ CameraX frame (ImageProxy → Bitmap, 640×480)
 ### Bước 5 — `MultiObjectTracker`
 
 **Việc cần làm:**
-1. Implement `UnionFind.kt` nếu chưa (dùng cho tracker)
-2. Implement `MultiObjectTracker.kt` với `Track` + Kalman + `predictOnly()`
-3. Tích hợp vào pipeline tạm: hiển thị track ID + smoothedBox lên màn hình
+1. Implement `BoxKalmanFilter.kt`, `TrackerEntry.kt` và `TrackConfig.kt`.
+2. Implement `MultiObjectTracker.kt` với Optical Flow (`updateWithOpticalFlow()`) + Kalman Filter.
+3. Tích hợp vào pipeline tạm: truyền `grayMat` và hiển thị track ID + smoothedBox lên màn hình.
 
 **Checkpoint:**
-- [ ] Track ID ổn định khi đứng yên nhìn vào 1 object > 10 giây — ID không đổi
-- [ ] Track ID không bị swap khi có 2 object song song
-- [ ] Tạo track mới khi object mới vào frame (ID mới xuất hiện)
-- [ ] Track bị xóa đúng sau `MAX_MISSED_FRAMES` (8) frame không detect được
-- [ ] `predictOnly()`: khi che camera rồi bỏ che → bbox trôi nhẹ theo Kalman, không bị reset về detection cũ
-- [ ] `clearAll()`: sau khi gọi → không còn track nào, frame tiếp theo tạo track mới
+- [ ] Track ID ổn định khi đứng yên nhìn vào 1 object > 10 giây — ID không đổi.
+- [ ] Track ID không bị swap khi có 2 object song song.
+- [ ] Tạo track mới khi object mới vào frame.
+- [ ] Track bị xóa đúng sau `TrackConfig.MAX_MISSED_FRAMES` (15) frame optical flow thất bại liên tiếp.
+- [ ] Optical Flow: khi không có inference mới, bbox dịch chuyển mượt mà theo chuyển động camera.
+- [ ] `clearAll()`: sau khi gọi → không còn track nào, frame tiếp theo tạo track mới.
 
 ---
 
@@ -1106,17 +1131,17 @@ CameraX frame (ImageProxy → Bitmap, 640×480)
 ### Bước 8 — `DevModePanel` + `CameraOverlayView` hoàn chỉnh
 
 **Việc cần làm:**
-1. Hoàn thiện `CameraOverlayView.kt`: màu theo proximity, label đầy đủ, scale đúng
-2. Implement `DevModePanel.kt` với `DevStats`
-3. Thêm DevMode FAB vào `activity_main.xml` và `MainActivity`
+1. Hoàn thiện `CameraOverlayView.kt`: màu theo proximity, label đầy đủ, scale đúng.
+2. Thêm `TextView` và `ImageView` vào `activity_main.xml` thay cho custom `DevModePanel`.
+3. Thêm nút `Cài đặt` (Settings) vào `activity_main.xml` và xử lý PopupMenu bật/tắt DevMode.
 
 **Checkpoint:**
-- [ ] FAB toggle đúng: tap → overlay + panel hiện, tap lại → ẩn
-- [ ] Màu bbox đúng: RED khi Z < 0.8m, cam khi < 1.5m, vàng khi < 3.0m, xám khi null
-- [ ] Label đúng format: "ID:1  1.2m  phía trước"
-- [ ] DevModePanel hiển thị FPS, Objects, Tilt, Inference, từng Track + Z
-- [ ] Tilt hiển thị bằng độ (tiltRad × 180/π), null hiển thị "N/A"
-- [ ] devMode = false (default): màn hình sạch, không có overlay nào
+- [ ] PopupMenu bật/tắt DevMode đúng: chọn → overlay + panel + depthmap hiện, chọn lại → ẩn.
+- [ ] Màu bbox đúng: RED khi Z < 0.8m, cam khi < 1.5m, vàng khi < 3.0m, xám khi null.
+- [ ] Label đúng format: "ID: 1 -> 1.20m".
+- [ ] DevMode Text hiển thị FPS, Objects, Tilt, từng Track + Z.
+- [ ] Tilt hiển thị bằng độ (tiltRad × 180/π), null hiển thị "N/A".
+- [ ] devMode = false (default): màn hình sạch, không có overlay nào.
 
 ---
 
@@ -1137,21 +1162,23 @@ CameraX frame (ImageProxy → Bitmap, 640×480)
 
 ---
 
-### Bước 10 — `MainActivity` hoàn chỉnh + end-to-end
+### Bước 10 — `MainActivity` hoàn chỉnh + Gemini + end-to-end
 
 **Việc cần làm:**
-1. Thêm UserHeight input flow (EditText + validate + SharedPreferences)
-2. Xin CAMERA permission đúng cách
-3. Camera intrinsics: lấy thực từ Camera2Interop, gọi `updateIntrinsics()`
-4. Lifecycle đầy đủ: onResume/onPause/onDestroy
+1. Thêm UserHeight input flow qua nút Cài đặt và màn hình khởi đầu.
+2. Xin CAMERA permission đúng cách và lấy Camera intrinsics.
+3. Tích hợp `SceneDescribeController` xử lý sự kiện Double Tap qua `GestureDetector`.
+4. Lifecycle đầy đủ: onResume/onPause/onDestroy.
 
 **Checkpoint:**
-- [ ] App lần đầu mở: hiện input height, validate từ chối < 100cm hoặc > 220cm
-- [ ] Mở lại app lần 2: không hiện input height nữa (đã lưu SharedPreferences)
-- [ ] Permission denied: hiện dialog, không crash
-- [ ] `onPause` → `onResume`: sensor restart đúng, TTS tiếp tục hoạt động
-- [ ] `onDestroy`: không có leak (kiểm tra Logcat không có "leaked" warning từ TFLite hay TTS)
-- [ ] Chạy end-to-end: đi bộ trong hành lang 3 phút, TTS phát cảnh báo đúng, không crash, không OOM
+- [ ] App lần đầu mở: hiện input height, validate từ chối < 100cm hoặc > 220cm.
+- [ ] Mở lại app lần 2: không hiện input height nữa (đã lưu SharedPreferences).
+- [ ] Permission denied: hiện dialog, không crash.
+- [ ] Double Tap khi đang chạy: TTS thông báo "Đang mô tả cảnh...", âm thanh cảnh báo khoảng cách tạm dừng.
+- [ ] API trả về: Đọc đúng mô tả 2-3 câu qua TTS. Âm thanh cảnh báo khoảng cách hoạt động lại sau khi đọc xong.
+- [ ] `onPause` → `onResume`: sensor restart đúng, TTS tiếp tục hoạt động.
+- [ ] `onDestroy`: không có leak.
+- [ ] Chạy end-to-end: đi bộ 3 phút, TTS phát cảnh báo đúng, không crash, không OOM.
 
 ---
 
@@ -1176,8 +1203,8 @@ DETECTION
 TRACKING
 [ ] Track ID ổn định khi đứng yên > 10 giây
 [ ] Track ID không bị swap giữa 2 object song song
-[ ] Track bị xóa sau đúng MAX_MISSED frame
-[ ] predictOnly() không correct bằng detection cũ
+[ ] Track bị xóa sau đúng 15 frame optical flow thất bại
+[ ] Optical flow update tracking đúng hướng khi di chuyển camera
 
 DISTANCE
 [ ] Z ≈ 1.0m khi cách vật 1m (sai số < ±20cm)
@@ -1193,11 +1220,17 @@ ALERT
 [ ] Không phát TTS khi Z >= 3.0m
 [ ] stop() và shutdown() lifecycle đúng
 
+GEMINI SCENE DESCRIBE
+[ ] Phản hồi "Đang mô tả cảnh..." khi Double Tap
+[ ] Khoảng cách được suppress đúng lúc để không ồn
+[ ] Output 2-3 câu, gọn gàng, đọc rõ tiếng Việt
+[ ] Xử lý đúng khi không có mạng (Timeout)
+
 DEVMODE
-[ ] FAB toggle đúng visibility
-[ ] FPS hiển thị realtime
+[ ] Nút Cài đặt popup hoạt động đúng
+[ ] DevMode text + depth bitmap hiển thị realtime
 [ ] Màu bbox đúng theo proximity
-[ ] Tất cả track và Z hiển thị đúng trong panel
+[ ] Tất cả track và Z hiển thị đúng trên Text panel
 
 PERFORMANCE
 [ ] FPS >= 15 khi có 3 object, devMode=false
