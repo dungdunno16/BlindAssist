@@ -1,7 +1,5 @@
 package com.example.blindassist.depth
 
-import android.util.Log
-import com.example.blindassist.Config
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat

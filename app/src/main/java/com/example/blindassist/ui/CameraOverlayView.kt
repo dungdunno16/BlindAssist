@@ -51,13 +51,19 @@ class CameraOverlayView @JvmOverloads constructor(
 
         val offsetX = (width - scaledImageW) / 2f
         val offsetY = (height - scaledImageH) / 2f
+        val imageLeft = offsetX
+        val imageTop = offsetY
+        val imageRight = offsetX + scaledImageW
+        val imageBottom = offsetY + scaledImageH
+        val strokeInset = paint.strokeWidth / 2f
+        val labelPadding = 8f
 
         for (track in tracks) {
             val box = track.smoothedBox
-            val left = box.x * scale + offsetX
-            val top = box.y * scale + offsetY
-            val right = (box.x + box.width) * scale + offsetX
-            val bottom = (box.y + box.height) * scale + offsetY
+            val rawLeft = box.x * scale + offsetX
+            val rawTop = box.y * scale + offsetY
+            val rawRight = (box.x + box.width) * scale + offsetX
+            val rawBottom = (box.y + box.height) * scale + offsetY
 
             val z = track.distanceM
             if (z != null) {
@@ -74,6 +80,12 @@ class CameraOverlayView @JvmOverloads constructor(
                 paint.color = Color.GRAY
             }
 
+            val left = rawLeft.coerceIn(imageLeft + strokeInset, imageRight - strokeInset)
+            val top = rawTop.coerceIn(imageTop + strokeInset, imageBottom - strokeInset)
+            val right = rawRight.coerceIn(imageLeft + strokeInset, imageRight - strokeInset)
+            val bottom = rawBottom.coerceIn(imageTop + strokeInset, imageBottom - strokeInset)
+            if (right <= left || bottom <= top) continue
+
             canvas.drawRect(left, top, right, bottom, paint)
             
             val centerX = box.x + box.width / 2.0
@@ -84,7 +96,20 @@ class CameraOverlayView @JvmOverloads constructor(
             }
 
             val distanceStr = z?.let { String.format("%.2fm", it) } ?: "N/A"
-            canvas.drawText("ID: ${track.id}  $distanceStr  $zone", left, top - 10f, textPaint)
+            val label = "$distanceStr  $zone"
+            val labelWidth = textPaint.measureText(label)
+            val labelX = left.coerceIn(
+                imageLeft + labelPadding,
+                (imageRight - labelPadding - labelWidth).coerceAtLeast(imageLeft + labelPadding)
+            )
+            val fontMetrics = textPaint.fontMetrics
+            val minBaseline = imageTop + labelPadding - fontMetrics.ascent
+            val maxBaseline = imageBottom - labelPadding - fontMetrics.descent
+            val aboveBaseline = top - labelPadding
+            val belowBaseline = top + labelPadding - fontMetrics.ascent
+            val labelY = if (aboveBaseline >= minBaseline) aboveBaseline else belowBaseline
+
+            canvas.drawText(label, labelX, labelY.coerceIn(minBaseline, maxBaseline), textPaint)
         }
     }
 }

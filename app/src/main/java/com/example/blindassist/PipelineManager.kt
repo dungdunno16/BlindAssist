@@ -2,7 +2,6 @@ package com.example.blindassist
 
 import android.graphics.Bitmap
 import android.util.Log
-import android.view.View
 import android.widget.ImageView
 import android.widget.TextView
 import com.example.blindassist.alert.AlertManager
@@ -11,9 +10,10 @@ import com.example.blindassist.depth.ContourDetector
 import com.example.blindassist.depth.DepthMaskProcessor
 import com.example.blindassist.depth.DistanceEstimator
 import com.example.blindassist.depth.MiDaSInference
+import com.example.blindassist.gemini.ObstacleInfo
+import com.example.blindassist.gemini.SceneMetadata
 import com.example.blindassist.sensor.TiltEstimator
 import com.example.blindassist.tracking.MultiObjectTracker
-import com.example.blindassist.tracking.TrackerEntry
 import com.example.blindassist.ui.CameraOverlayView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -38,15 +38,28 @@ class PipelineManager(
 ) {
     private var inferenceJob: Job? = null
     
-    @Volatile private var hasNewDetections = false
-    private var latestDetections: List<Rect> = emptyList()
-    @Volatile private var latestDepthBitmap: Bitmap? = null
+    private data class DetectionResult(
+        val boxes: List<Rect>,
+        val sceneChanged: Boolean
+    )
+
+    private val detectionLock = Any()
+    private var pendingDetectionResult: DetectionResult? = null
+
+    private val depthLock = Any()
+    private var pendingDepthBitmap: Bitmap? = null
+    private var displayedDepthBitmap: Bitmap? = null
     
     private val frameLock = Any()
     private var _latestFrameBitmap: Bitmap? = null
 
-    private var latestTracks: List<TrackerEntry> = emptyList()
-    private var lastFrameWidth: Int = 0
+    @Volatile
+    private var latestSceneMetadata = SceneMetadata(
+        obstacleCount = 0,
+        obstacles = emptyList(),
+        tiltAngleDeg = null,
+        fps = 0f
+    )
     
     private var prevFgCount = 0
 
@@ -57,7 +70,6 @@ class PipelineManager(
         private set
 
     fun onFrame(bitmap: Bitmap, grayMat: Mat, frameWidth: Int, frameHeight: Int, scope: CoroutineScope) {
-        
         // --- Step A: Background Inference ---
         if (inferenceJob?.isActive != true) {
             inferenceJob = scope.launch(Dispatchers.Default) {
@@ -77,23 +89,20 @@ class PipelineManager(
                     
                     // Scene change detection
                     val currFgCount = mergedBoxes.size
+                    var sceneChanged = false
                     if (prevFgCount > 0) {
                         val ratio = currFgCount.toDouble() / prevFgCount
                         if (ratio < Config.SCENE_CHANGE_MIN_RATIO || ratio > Config.SCENE_CHANGE_MAX_RATIO) {
-                            // Run on Main thread since tracker/distanceEstimator are not thread-safe
-                            launch(Dispatchers.Main) {
-                                tracker.clearAll()
-                                distanceEstimator.clearAll()
-                            }
+                            sceneChanged = true
                         }
                     }
                     prevFgCount = currFgCount
 
-                    latestDetections = mergedBoxes
-                    
-                    latestDepthBitmap = depthBitmap
-                    
-                    hasNewDetections = true
+                    synchronized(detectionLock) {
+                        pendingDetectionResult = DetectionResult(mergedBoxes, sceneChanged)
+                    }
+
+                    setPendingDepthBitmap(depthBitmap)
                     
                     resultMat.release()
                     maskMat.release()
@@ -112,10 +121,19 @@ class PipelineManager(
         // --- Step B: Main Thread Tracking & UI Update ---
         scope.launch(Dispatchers.Main) {
             try {
+                val detectionResult = synchronized(detectionLock) {
+                    pendingDetectionResult.also {
+                        pendingDetectionResult = null
+                    }
+                }
+
                 // Tracking
-                val tracks = if (hasNewDetections) {
-                    hasNewDetections = false
-                    tracker.updateWithDetections(latestDetections, grayMat)
+                val tracks = if (detectionResult != null) {
+                    if (detectionResult.sceneChanged) {
+                        tracker.clearAll()
+                        distanceEstimator.clearAll()
+                    }
+                    tracker.updateWithDetections(detectionResult.boxes, grayMat)
                 } else {
                     tracker.updateWithOpticalFlow(grayMat)
                 }
@@ -132,9 +150,6 @@ class PipelineManager(
                 // Alerts
                 alertManager.update(tracks, frameWidth)
 
-                latestTracks = tracks.toList()
-                lastFrameWidth = frameWidth
-
                 // FPS Calculation
                 framesSinceLastFps++
                 val currentTime = System.currentTimeMillis()
@@ -146,14 +161,13 @@ class PipelineManager(
                     lastFpsTime = currentTime
                 }
 
+                latestSceneMetadata = buildSceneMetadata(tracks, frameWidth, tiltRad)
+
                 // Dev Mode UI
                 val isDevMode = devModeProvider()
+                updateDepthPreview(isDevMode)
                 if (isDevMode) {
                     overlayView.updateTracks(tracks, frameWidth, frameHeight)
-                    
-                    latestDepthBitmap?.let {
-                        depthImageView.setImageBitmap(it)
-                    }
 
                     val stats = StringBuilder()
                     stats.append("FPS: ${String.format("%.1f", currentFps)}\n")
@@ -164,7 +178,7 @@ class PipelineManager(
                     
                     for (track in tracks) {
                         val zStr = track.distanceM?.let { String.format("%.2fm", it) } ?: "N/A"
-                        stats.append("ID: ${track.id} -> $zStr\n")
+                        stats.append("Object-> $zStr\n")
                     }
                     devModePanel.text = stats.toString()
                 }
@@ -194,29 +208,82 @@ class PipelineManager(
             _latestFrameBitmap?.recycle()
             _latestFrameBitmap = null
         }
+        clearDepthPreview()
     }
 
-    fun getSceneMetadataSnapshot(): com.example.blindassist.gemini.SceneMetadata {
-        val obstacles = latestTracks.map { track ->
+    private fun setPendingDepthBitmap(bitmap: Bitmap) {
+        val oldPending = synchronized(depthLock) {
+            val old = pendingDepthBitmap
+            pendingDepthBitmap = bitmap
+            old
+        }
+        oldPending?.recycle()
+    }
+
+    private fun takePendingDepthBitmap(): Bitmap? {
+        return synchronized(depthLock) {
+            pendingDepthBitmap.also {
+                pendingDepthBitmap = null
+            }
+        }
+    }
+
+    private fun updateDepthPreview(isDevMode: Boolean) {
+        val pending = takePendingDepthBitmap()
+
+        if (isDevMode) {
+            pending?.let { newBitmap ->
+                val oldDisplayed = displayedDepthBitmap
+                depthImageView.setImageBitmap(newBitmap)
+                oldDisplayed?.recycle()
+                displayedDepthBitmap = newBitmap
+            }
+        } else {
+            pending?.recycle()
+            if (displayedDepthBitmap != null) {
+                depthImageView.setImageBitmap(null)
+                displayedDepthBitmap?.recycle()
+                displayedDepthBitmap = null
+            }
+        }
+    }
+
+    private fun clearDepthPreview() {
+        val pending = takePendingDepthBitmap()
+        pending?.recycle()
+
+        depthImageView.setImageBitmap(null)
+        displayedDepthBitmap?.recycle()
+        displayedDepthBitmap = null
+    }
+
+    private fun buildSceneMetadata(
+        tracks: List<com.example.blindassist.tracking.TrackerEntry>,
+        frameWidth: Int,
+        tiltRad: Double?
+    ): SceneMetadata {
+        val obstacles = tracks.map { track ->
             val centerX = track.smoothedBox.x + track.smoothedBox.width / 2.0
             val zone = when {
-                lastFrameWidth == 0 -> "giữa"
-                centerX < lastFrameWidth * 0.35 -> "trái"
-                centerX > lastFrameWidth * 0.65 -> "phải"
+                frameWidth == 0 -> "giữa"
+                centerX < frameWidth * 0.35 -> "trái"
+                centerX > frameWidth * 0.65 -> "phải"
                 else -> "giữa"
             }
-            com.example.blindassist.gemini.ObstacleInfo(
+            ObstacleInfo(
                 id = track.id,
                 zone = zone,
                 distanceMeters = track.distanceM,
                 hasReliableDistance = track.distanceM != null
             )
         }
-        return com.example.blindassist.gemini.SceneMetadata(
+        return SceneMetadata(
             obstacleCount = obstacles.size,
             obstacles = obstacles,
-            tiltAngleDeg = tiltEstimator.getTiltRad()?.let { Math.toDegrees(it) },
+            tiltAngleDeg = tiltRad?.let { Math.toDegrees(it) },
             fps = currentFps
         )
     }
+
+    fun getSceneMetadataSnapshot(): SceneMetadata = latestSceneMetadata
 }

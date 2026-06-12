@@ -1,6 +1,10 @@
 package com.example.blindassist.alert
 
 import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import com.example.blindassist.Config
@@ -11,6 +15,14 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
 
     private var tts: TextToSpeech? = null
     private var isReady = false
+    private var voiceAlertsEnabled = true
+    private var vibrationEnabled = true
+    private val vibrator: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        context.getSystemService(VibratorManager::class.java).defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+    }
 
     enum class Zone(val text: String) {
         LEFT("bên trái"),
@@ -18,11 +30,11 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
         RIGHT("bên phải")
     }
 
-    enum class Tier(val cooldownMs: Long) {
-        CRITICAL(Config.COOLDOWN_CRITICAL_MS),
-        NEAR(Config.COOLDOWN_NEAR_MS),
-        MID(Config.COOLDOWN_MID_MS),
-        FAR(0L)
+    enum class Tier {
+        CRITICAL,
+        NEAR,
+        MID,
+        FAR
     }
 
     private val lastAlertTier = mutableMapOf<Int, Tier>()
@@ -62,7 +74,6 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
     )
 
     fun update(tracks: List<TrackerEntry>, frameWidth: Int) {
-        if (!isReady || tts == null) return
         if (System.currentTimeMillis() < suppressAlertsUntilMs) return
 
         val now = System.currentTimeMillis()
@@ -133,16 +144,20 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
 
         // 3. Pick the most dangerous alert only
         val chosen = pendingAlerts.minByOrNull { it.tier.ordinal } ?: return
+        vibrate(chosen.tier)
 
         // 4. CRITICAL always speaks immediately (flush everything)
         if (chosen.tier == Tier.CRITICAL) {
-            tts?.speak(chosen.text, TextToSpeech.QUEUE_FLUSH, null, "alert_${chosen.trackId}_CRITICAL")
-            lastAlertSpokenMs = now
+            if (voiceAlertsEnabled && isReady && tts != null) {
+                tts?.speak(chosen.text, TextToSpeech.QUEUE_FLUSH, null, "alert_${chosen.trackId}_CRITICAL")
+                lastAlertSpokenMs = now
+            }
             Log.d("AlertManager", "CRITICAL alert for ID ${chosen.trackId}: ${chosen.text}")
             return
         }
 
         // 5. Non-critical: skip if TTS is still speaking or cooldown hasn't passed
+        if (!voiceAlertsEnabled || !isReady || tts == null) return
         if (tts?.isSpeaking == true) return
         if (now - lastAlertSpokenMs < ALERT_MIN_INTERVAL_MS) return
 
@@ -151,22 +166,49 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
         Log.d("AlertManager", "Alert fired for ID ${chosen.trackId}: ${chosen.text}")
     }
 
+    private fun vibrate(tier: Tier) {
+        if (!vibrationEnabled || !vibrator.hasVibrator()) return
+
+        val (timings, amplitudes) = when (tier) {
+            Tier.CRITICAL -> longArrayOf(0, 250, 100, 250, 100, 350) to intArrayOf(0, 255, 0, 255, 0, 255)
+            Tier.NEAR -> longArrayOf(0, 200, 120, 200) to intArrayOf(0, 220, 0, 220)
+            Tier.MID -> longArrayOf(0, 180) to intArrayOf(0, 160)
+            Tier.FAR -> return
+        }
+
+        vibrator.vibrate(VibrationEffect.createWaveform(timings, amplitudes, -1))
+    }
+
+    fun setVoiceAlertsEnabled(enabled: Boolean) {
+        voiceAlertsEnabled = enabled
+        lastAlertTier.clear()
+        if (!enabled) tts?.stop()
+    }
+
+    fun setVibrationEnabled(enabled: Boolean) {
+        vibrationEnabled = enabled
+        lastAlertTier.clear()
+        if (!enabled) vibrator.cancel()
+    }
+
     fun suppressAlerts(durationMs: Long) {
         suppressAlertsUntilMs = System.currentTimeMillis() + durationMs
     }
 
     fun speakImmediate(text: String) {
-        if (!isReady || tts == null) return
+        if (!voiceAlertsEnabled || !isReady || tts == null) return
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "gemini_describe")
     }
 
     fun stop() {
+        vibrator.cancel()
         if (isReady) {
             tts?.stop()
         }
     }
 
     fun shutdown() {
+        vibrator.cancel()
         tts?.stop()
         tts?.shutdown()
         isReady = false

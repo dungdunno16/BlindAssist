@@ -10,7 +10,6 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -25,15 +24,13 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.appcompat.widget.SwitchCompat
 import android.view.Surface
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
-import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.lifecycle.lifecycleScope
-import com.example.blindassist.depth.ContourDetector
 import com.example.blindassist.depth.DistanceEstimator
-import com.example.blindassist.depth.DepthMaskProcessor
 import com.example.blindassist.depth.MiDaSInference
 import com.example.blindassist.ui.CameraOverlayView
 import com.example.blindassist.tracking.MultiObjectTracker
@@ -46,8 +43,6 @@ import android.annotation.SuppressLint
 import kotlinx.coroutines.*
 import org.opencv.android.OpenCVLoader
 import org.opencv.android.Utils
-import org.opencv.core.Core
-import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.imgproc.Imgproc
 import java.util.concurrent.ExecutorService
@@ -65,6 +60,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var depthImageView: ImageView
     private lateinit var devModePanel: TextView
     private lateinit var btnSettings: Button
+    private lateinit var settingsLayout: LinearLayout
+    private lateinit var switchVoiceAlerts: SwitchCompat
+    private lateinit var switchVibration: SwitchCompat
+    private lateinit var btnEditHeight: Button
+    private lateinit var btnToggleDevMode: Button
+    private lateinit var btnCloseSettings: Button
     
     private lateinit var heightInputLayout: LinearLayout
     private lateinit var etUserHeight: EditText
@@ -110,38 +111,6 @@ class MainActivity : AppCompatActivity() {
         devModePanel = findViewById(R.id.devModePanel)
         btnSettings = findViewById(R.id.btnSettings)
 
-        btnSettings.setOnClickListener { view ->
-            val popup = PopupMenu(this, view)
-            popup.menu.add("Chỉnh sửa chiều cao")
-            val devModeTitle = if (isDevMode) "Tắt DevMode" else "Bật DevMode"
-            popup.menu.add(devModeTitle)
-            
-            popup.setOnMenuItemClickListener { item ->
-                when (item.title) {
-                    "Chỉnh sửa chiều cao" -> {
-                        val prefs = getSharedPreferences("blind_assist_prefs", Context.MODE_PRIVATE)
-                        val savedHeight = prefs.getInt(Config.PREF_KEY_HEIGHT, 160)
-                        etUserHeight.setText(savedHeight.toString())
-                        tvHeightError.visibility = View.GONE
-                        btnCancelHeight.visibility = View.VISIBLE
-                        btnStart.text = "Lưu"
-                        heightInputLayout.visibility = View.VISIBLE
-                        true
-                    }
-                    "Bật DevMode", "Tắt DevMode" -> {
-                        isDevMode = !isDevMode
-                        val visibility = if (isDevMode) View.VISIBLE else View.GONE
-                        overlayView.visibility = visibility
-                        depthImageView.visibility = visibility
-                        devModePanel.visibility = visibility
-                        true
-                    }
-                    else -> false
-                }
-            }
-            popup.show()
-        }
-
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
@@ -153,11 +122,58 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("blind_assist_prefs", Context.MODE_PRIVATE)
         val savedHeight = prefs.getInt(Config.PREF_KEY_HEIGHT, -1)
         
+        settingsLayout = findViewById(R.id.settingsLayout)
+        switchVoiceAlerts = findViewById(R.id.switchVoiceAlerts)
+        switchVibration = findViewById(R.id.switchVibration)
+        btnEditHeight = findViewById(R.id.btnEditHeight)
+        btnToggleDevMode = findViewById(R.id.btnToggleDevMode)
+        btnCloseSettings = findViewById(R.id.btnCloseSettings)
         heightInputLayout = findViewById(R.id.heightInputLayout)
         etUserHeight = findViewById(R.id.etUserHeight)
         tvHeightError = findViewById(R.id.tvHeightError)
         btnStart = findViewById(R.id.btnStart)
         btnCancelHeight = findViewById(R.id.btnCancelHeight)
+
+        switchVoiceAlerts.isChecked = prefs.getBoolean(Config.PREF_KEY_VOICE_ALERTS, true)
+        switchVibration.isChecked = prefs.getBoolean(Config.PREF_KEY_VIBRATION, true)
+
+        btnSettings.setOnClickListener {
+            btnToggleDevMode.text = if (isDevMode) "Tắt DevMode" else "Bật DevMode"
+            settingsLayout.visibility = View.VISIBLE
+        }
+
+        btnCloseSettings.setOnClickListener {
+            settingsLayout.visibility = View.GONE
+        }
+
+        switchVoiceAlerts.setOnCheckedChangeListener { _, enabled ->
+            prefs.edit().putBoolean(Config.PREF_KEY_VOICE_ALERTS, enabled).apply()
+            if (::alertManager.isInitialized) alertManager.setVoiceAlertsEnabled(enabled)
+        }
+
+        switchVibration.setOnCheckedChangeListener { _, enabled ->
+            prefs.edit().putBoolean(Config.PREF_KEY_VIBRATION, enabled).apply()
+            if (::alertManager.isInitialized) alertManager.setVibrationEnabled(enabled)
+        }
+
+        btnEditHeight.setOnClickListener {
+            val currentHeight = prefs.getInt(Config.PREF_KEY_HEIGHT, 160)
+            etUserHeight.setText(currentHeight.toString())
+            tvHeightError.visibility = View.GONE
+            btnCancelHeight.visibility = View.VISIBLE
+            btnStart.text = "Lưu"
+            settingsLayout.visibility = View.GONE
+            heightInputLayout.visibility = View.VISIBLE
+        }
+
+        btnToggleDevMode.setOnClickListener {
+            isDevMode = !isDevMode
+            val visibility = if (isDevMode) View.VISIBLE else View.GONE
+            overlayView.visibility = visibility
+            depthImageView.visibility = visibility
+            devModePanel.visibility = visibility
+            btnToggleDevMode.text = if (isDevMode) "Tắt DevMode" else "Bật DevMode"
+        }
 
         btnCancelHeight.setOnClickListener {
             heightInputLayout.visibility = View.GONE
@@ -179,7 +195,8 @@ class MainActivity : AppCompatActivity() {
                 heightInputLayout.visibility = View.GONE
                 
                 if (::distanceEstimator.isInitialized) {
-                    distanceEstimator.H = heightCm * Config.CAMERA_HEIGHT_RATIO / 100.0
+//                    distanceEstimator.H = heightCm * Config.CAMERA_HEIGHT_RATIO / 100.0
+                    distanceEstimator.H = heightCm/100.0
                 } else {
                     initializeApp(heightCm)
                 }
@@ -197,7 +214,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initializeApp(heightCm: Int) {
-        val H = heightCm * Config.CAMERA_HEIGHT_RATIO / 100.0
+//        val H = heightCm * Config.CAMERA_HEIGHT_RATIO / 100.0
+        val H = heightCm/100.0
         distanceEstimator = DistanceEstimator(H = H)
         tracker.distanceEstimator = distanceEstimator
 
@@ -205,6 +223,9 @@ class MainActivity : AppCompatActivity() {
         tiltEstimator.start()
         
         alertManager = com.example.blindassist.alert.AlertManager(this)
+        val prefs = getSharedPreferences("blind_assist_prefs", Context.MODE_PRIVATE)
+        alertManager.setVoiceAlertsEnabled(prefs.getBoolean(Config.PREF_KEY_VOICE_ALERTS, true))
+        alertManager.setVibrationEnabled(prefs.getBoolean(Config.PREF_KEY_VIBRATION, true))
         midasInference = MiDaSInference(this)
         cameraExecutor = Executors.newSingleThreadExecutor()
 

@@ -55,7 +55,77 @@
         android:textColor="#FFFFFF"
         android:backgroundTint="#AA000000" />
 
-    <!-- Layer 6: Height Input Form Overlay -->
+    <!-- Layer 6: Settings Overlay -->
+    <LinearLayout
+        android:id="@+id/settingsLayout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#DD000000"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:text="Cài đặt cảnh báo"
+            android:textColor="#FFFFFF"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchVoiceAlerts"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:checked="true"
+            android:gravity="center_vertical"
+            android:text="Báo bằng giọng nói"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp" />
+
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchVibration"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:checked="true"
+            android:gravity="center_vertical"
+            android:text="Báo bằng rung"
+            android:textColor="#FFFFFF"
+            android:textSize="18sp" />
+
+        <Button
+            android:id="@+id/btnEditHeight"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:backgroundTint="#0088FF"
+            android:text="Chỉnh sửa chiều cao"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/btnToggleDevMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:backgroundTint="#666666"
+            android:text="Bật DevMode"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/btnCloseSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:backgroundTint="#666666"
+            android:text="Đóng"
+            android:textColor="#FFFFFF" />
+    </LinearLayout>
+
+    <!-- Layer 7: Height Input Form Overlay -->
     <LinearLayout
         android:id="@+id/heightInputLayout"
         android:layout_width="match_parent"

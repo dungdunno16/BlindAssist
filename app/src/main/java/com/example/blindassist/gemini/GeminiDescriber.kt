@@ -13,11 +13,18 @@ class GeminiDescriber(apiKey: String) {
 
     suspend fun describe(bitmap: Bitmap, metadata: SceneMetadata): String? {
         val prompt = buildPrompt(metadata)
-        val response = model.generateContent(content {
-            image(downscaleForGemini(bitmap, Config.DESCRIBE_IMAGE_MAX_SIDE))
-            text(prompt)
-        })
-        return response.text?.takeIf { it.isNotBlank() }
+        val geminiBitmap = downscaleForGemini(bitmap, Config.DESCRIBE_IMAGE_MAX_SIDE)
+        return try {
+            val response = model.generateContent(content {
+                image(geminiBitmap)
+                text(prompt)
+            })
+            response.text?.takeIf { it.isNotBlank() }
+        } finally {
+            if (geminiBitmap !== bitmap) {
+                geminiBitmap.recycle()
+            }
+        }
     }
 
     private fun downscaleForGemini(src: Bitmap, maxSide: Int): Bitmap {
