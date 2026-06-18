@@ -326,8 +326,6 @@ Trong đó:
 
 ## 📄 Giấy Phép
 
-Dự án này được phát triển như một phần của **Đồ Án Tốt Nghiệp (DATN)**.
-
 ### Thư viện bên thứ ba
 
 - **MiDaS** (Intel ISL) — [MIT License](https://github.com/isl-org/MiDaS/blob/master/LICENSE)
