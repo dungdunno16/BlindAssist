@@ -40,6 +40,7 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
     private val lastAlertTier = mutableMapOf<Int, Tier>()
     
     private var suppressAlertsUntilMs: Long = 0L
+    @Volatile private var isSuppressedIndefinitely: Boolean = false
 
     init {
         tts = TextToSpeech(context, this)
@@ -74,7 +75,7 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
     )
 
     fun update(tracks: List<TrackerEntry>, frameWidth: Int) {
-        if (System.currentTimeMillis() < suppressAlertsUntilMs) return
+        if (isSuppressedIndefinitely || System.currentTimeMillis() < suppressAlertsUntilMs) return
 
         val now = System.currentTimeMillis()
         val currentTrackIds = tracks.map { it.id }.toSet()
@@ -85,13 +86,7 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
 
         for (track in tracks) {
             val z = track.distanceM ?: continue
-            val centerX = track.smoothedBox.x + track.smoothedBox.width / 2.0
-            
-            val zone = when {
-                centerX < frameWidth * 0.35 -> Zone.LEFT
-                centerX > frameWidth * 0.65 -> Zone.RIGHT
-                else -> Zone.CENTER
-            }
+            val zone = classifyZone(track.smoothedBox, frameWidth)
 
             val previousTier = lastAlertTier[track.id] ?: Tier.FAR
             
@@ -142,28 +137,34 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
         // 2. Nothing to say
         if (pendingAlerts.isEmpty()) return
 
-        // 3. Pick the most dangerous alert only
-        val chosen = pendingAlerts.minByOrNull { it.tier.ordinal } ?: return
-        vibrate(chosen.tier)
+        // 3. Sort by danger level (most dangerous first)
+        val sorted = pendingAlerts.sortedBy { it.tier.ordinal }
+        val highestTier = sorted.first().tier
 
-        // 4. CRITICAL always speaks immediately (flush everything)
-        if (chosen.tier == Tier.CRITICAL) {
+        // Vibrate based on the most dangerous tier
+        vibrate(highestTier)
+
+        // 4. Combine all alerts into a single sentence
+        val combinedText = sorted.joinToString(", ") { it.text }
+
+        // 5. CRITICAL always speaks immediately (flush everything)
+        if (highestTier == Tier.CRITICAL) {
             if (voiceAlertsEnabled && isReady && tts != null) {
-                tts?.speak(chosen.text, TextToSpeech.QUEUE_FLUSH, null, "alert_${chosen.trackId}_CRITICAL")
+                tts?.speak(combinedText, TextToSpeech.QUEUE_FLUSH, null, "alert_combined_CRITICAL")
                 lastAlertSpokenMs = now
             }
-            Log.d("AlertManager", "CRITICAL alert for ID ${chosen.trackId}: ${chosen.text}")
+            Log.d("AlertManager", "CRITICAL combined alert: $combinedText")
             return
         }
 
-        // 5. Non-critical: skip if TTS is still speaking or cooldown hasn't passed
+        // 6. Non-critical: skip if TTS is still speaking or cooldown hasn't passed
         if (!voiceAlertsEnabled || !isReady || tts == null) return
         if (tts?.isSpeaking == true) return
         if (now - lastAlertSpokenMs < ALERT_MIN_INTERVAL_MS) return
 
-        tts?.speak(chosen.text, TextToSpeech.QUEUE_ADD, null, "alert_${chosen.trackId}_${chosen.tier.name}")
+        tts?.speak(combinedText, TextToSpeech.QUEUE_ADD, null, "alert_combined_${highestTier.name}")
         lastAlertSpokenMs = now
-        Log.d("AlertManager", "Alert fired for ID ${chosen.trackId}: ${chosen.text}")
+        Log.d("AlertManager", "Combined alert fired: $combinedText")
     }
 
     private fun vibrate(tier: Tier) {
@@ -195,8 +196,37 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
         suppressAlertsUntilMs = System.currentTimeMillis() + durationMs
     }
 
-    fun speakImmediate(text: String) {
-        if (!voiceAlertsEnabled || !isReady || tts == null) return
+    fun suppressIndefinitely() {
+        isSuppressedIndefinitely = true
+        vibrator.cancel()
+    }
+
+    fun resumeAlerts() {
+        isSuppressedIndefinitely = false
+        lastAlertTier.clear()
+    }
+
+    fun speakImmediate(text: String, onDone: (() -> Unit)? = null) {
+        if (!voiceAlertsEnabled || !isReady || tts == null) {
+            onDone?.invoke()
+            return
+        }
+        if (onDone != null) {
+            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    if (utteranceId == "gemini_describe") {
+                        onDone.invoke()
+                    }
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    if (utteranceId == "gemini_describe") {
+                        onDone.invoke()
+                    }
+                }
+            })
+        }
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "gemini_describe")
     }
 
@@ -213,5 +243,49 @@ class AlertManager(context: Context) : TextToSpeech.OnInitListener {
         tts?.shutdown()
         isReady = false
         tts = null
+    }
+
+    companion object {
+        // Zone boundary ratios
+        private const val LEFT_END = 0.30
+        private const val RIGHT_START = 0.70
+        // If CENTER coverage >= this fraction of box width, classify as CENTER
+        private const val CENTER_PRIORITY_THRESHOLD = 0.40
+
+        /**
+         * Coverage-based zone classification.
+         * Instead of using only the box center point, this calculates how much
+         * of the box overlaps each zone (LEFT 0-30%, CENTER 30-70%, RIGHT 70-100%).
+         * CENTER is prioritized: if >= 40% of the box covers CENTER, it's "phía trước".
+         * Otherwise the zone with the most coverage wins.
+         */
+        fun classifyZone(box: org.opencv.core.Rect, frameWidth: Int): Zone {
+            if (frameWidth <= 0) return Zone.CENTER
+
+            val boxLeft = box.x.toDouble()
+            val boxRight = (box.x + box.width).toDouble()
+            val boxW = box.width.toDouble()
+            if (boxW <= 0) return Zone.CENTER
+
+            val leftBoundary = frameWidth * LEFT_END
+            val rightBoundary = frameWidth * RIGHT_START
+
+            // Calculate overlap with each zone
+            val overlapLeft = (minOf(boxRight, leftBoundary) - maxOf(boxLeft, 0.0)).coerceAtLeast(0.0)
+            val overlapCenter = (minOf(boxRight, rightBoundary) - maxOf(boxLeft, leftBoundary)).coerceAtLeast(0.0)
+            val overlapRight = (minOf(boxRight, frameWidth.toDouble()) - maxOf(boxLeft, rightBoundary)).coerceAtLeast(0.0)
+
+            // Fraction of box width in each zone
+            val fracCenter = overlapCenter / boxW
+
+            // Prioritize CENTER if significant coverage (most important for safety)
+            if (fracCenter >= CENTER_PRIORITY_THRESHOLD) return Zone.CENTER
+
+            // Otherwise, pick zone with most coverage
+            return when {
+                overlapLeft >= overlapRight -> Zone.LEFT
+                else -> Zone.RIGHT
+            }
+        }
     }
 }

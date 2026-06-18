@@ -88,15 +88,10 @@ class CameraOverlayView @JvmOverloads constructor(
 
             canvas.drawRect(left, top, right, bottom, paint)
             
-            val centerX = box.x + box.width / 2.0
-            val zone = when {
-                centerX < imageWidth * 0.35 -> "bên trái"
-                centerX > imageWidth * 0.65 -> "bên phải"
-                else -> "phía trước"
-            }
+            val zone = com.example.blindassist.alert.AlertManager.classifyZone(box, imageWidth)
 
             val distanceStr = z?.let { String.format("%.2fm", it) } ?: "N/A"
-            val label = "$distanceStr  $zone"
+            val label = "$distanceStr  ${zone.text}"
             val labelWidth = textPaint.measureText(label)
             val labelX = left.coerceIn(
                 imageLeft + labelPadding,

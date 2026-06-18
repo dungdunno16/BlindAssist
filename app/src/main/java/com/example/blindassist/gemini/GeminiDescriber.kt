@@ -56,7 +56,7 @@ class GeminiDescriber(apiKey: String) {
 
             Hãy mô tả ngắn gọn bằng tiếng Việt trong 2-3 câu, dễ nghe qua TTS.
             Ưu tiên thông tin quan trọng cho di chuyển an toàn: vật cản gần, hướng trái/phải/phía trước,
-            lối đi, người hoặc phương tiện nếu thấy rõ.
+            lối đi có thể đi, có thể đi về bên nào để tránh vật cản, người hoặc phương tiện nếu thấy rõ.
 
             Thông tin từ hệ thống nhận diện:
             - Số vật cản phát hiện: ${metadata.obstacleCount}

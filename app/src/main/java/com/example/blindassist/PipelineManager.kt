@@ -263,16 +263,10 @@ class PipelineManager(
         tiltRad: Double?
     ): SceneMetadata {
         val obstacles = tracks.map { track ->
-            val centerX = track.smoothedBox.x + track.smoothedBox.width / 2.0
-            val zone = when {
-                frameWidth == 0 -> "giữa"
-                centerX < frameWidth * 0.35 -> "trái"
-                centerX > frameWidth * 0.65 -> "phải"
-                else -> "giữa"
-            }
+            val zone = com.example.blindassist.alert.AlertManager.classifyZone(track.smoothedBox, frameWidth)
             ObstacleInfo(
                 id = track.id,
-                zone = zone,
+                zone = zone.text,
                 distanceMeters = track.distanceM,
                 hasReliableDistance = track.distanceM != null
             )

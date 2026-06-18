@@ -40,9 +40,9 @@ class SceneDescribeController(
         }
         val metadata = pipelineManager.getSceneMetadataSnapshot()
 
-        // 4. Suppress alerts + give feedback
+        // 4. Suppress all alerts (voice + vibration) + give feedback
         isDescribing = true
-        alertManager.suppressAlerts(Config.DESCRIBE_SUPPRESS_ALERT_MS)
+        alertManager.suppressIndefinitely()
         alertManager.speakImmediate("Đang mô tả cảnh...")
 
         // 5. Call API with timeout
@@ -52,15 +52,20 @@ class SceneDescribeController(
                     geminiDescriber.describe(snapshot, metadata)
                 }
                 withContext(Dispatchers.Main) {
-                    when {
-                        result != null -> alertManager.speakImmediate(result)
-                        else -> alertManager.speakImmediate("Mạng chậm, không thể mô tả cảnh lúc này")
+                    val text = when {
+                        result != null -> result
+                        else -> "Mạng chậm, không thể mô tả cảnh lúc này"
+                    }
+                    alertManager.speakImmediate(text) {
+                        alertManager.resumeAlerts()
                     }
                 }
             } catch (e: Exception) {
                 android.util.Log.e("SceneDescribe", "Gemini API failed", e)
                 withContext(Dispatchers.Main) {
-                    alertManager.speakImmediate("Không thể mô tả cảnh, vui lòng kiểm tra mạng")
+                    alertManager.speakImmediate("Không thể mô tả cảnh, vui lòng kiểm tra mạng") {
+                        alertManager.resumeAlerts()
+                    }
                 }
             } finally {
                 snapshot.recycle()
