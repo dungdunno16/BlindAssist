@@ -339,5 +339,5 @@ Dự án này được phát triển như một phần của **Đồ Án Tốt N
 ---
 
 <p align="center">
-  Được phát triển với ❤️ để hỗ trợ cộng đồng người khiếm thị Việt Nam
+  Được phát triển để hỗ trợ cộng đồng người khiếm thị Việt Nam
 </p>
